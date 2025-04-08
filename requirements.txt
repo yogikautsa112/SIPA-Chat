@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+transformers
+torch
+deep-translator
+python-dotenv
+google-search-results
+sentencepiece
