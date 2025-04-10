@@ -14,109 +14,108 @@ SERP_API_KEY = os.getenv("SERAPI_KEY")
 if not SERP_API_KEY:
     raise ValueError("SERAPI_KEY is missing from environment variables.")
 
-# Model paths
-bert_id = "goy2/bert-model-SIPA-V1"
-t5_id = "goy2/t5-squad2-checkpoint"
+# ========== Load Model ==========
+tokenizer_t5 = T5Tokenizer.from_pretrained("oke190231/t5-tokenizer-50percent")
+model_t5 = T5ForConditionalGeneration.from_pretrained("oke190231/t5-squad2-checkpoint")
 
-# Lazy-loaded model placeholders
-bert_tokenizer = None
-bert_model = None
-classifier = None
-t5_tokenizer = None
-t5_model = None
+tokenizer_bert = BertTokenizer.from_pretrained("oke190231/bert_intent_model")
+model_bert = BertForSequenceClassification.from_pretrained("oke190231/bert_intent_model")
+classifier = pipeline("text-classification", model=model_bert, tokenizer=tokenizer_bert)
 
-labels = {
-    0: "kata-kasar",
-    1: "laporan-kekerasan",
-    2: "psikologi",
-    3: "data-umum",
-    4: "jumlah-kdrt"
+# ========== Intent Mapping ==========
+intent_labels = {
+    "kata-kasar": 0,
+    "laporan-kekerasan": 1,
+    "psikologi": 2,
+    "data-umum": 3,
+    "jumlah-kdrt": 4
 }
+reverse_labels = {v: k for k, v in intent_labels.items()}
 
+# ========== FastAPI App ==========
 app = FastAPI()
 
-class TextInput(BaseModel):
+# ========== Request Schema ==========
+class QuestionInput(BaseModel):
     question: str
 
-# Lazy-load model loader
-def load_models():
-    global bert_tokenizer, bert_model, classifier
-    global t5_tokenizer, t5_model
+# ========== Fungsi Intent ==========
+def predict_intent(texts):
+    predictions = classifier(texts)
+    results = []
+    for text, pred in zip(texts, predictions):
+        label_index = int(pred["label"].split("_")[1])
+        intent = reverse_labels[label_index]
+        results.append((text, intent))
+    return results
 
-    if not bert_tokenizer or not bert_model:
-        bert_tokenizer = BertTokenizer.from_pretrained(bert_id)
-        bert_model = BertForSequenceClassification.from_pretrained(bert_id)
-        classifier = pipeline("text-classification", model=bert_model, tokenizer=bert_tokenizer, truncation=True)
-
-    if not t5_tokenizer or not t5_model:
-        t5_tokenizer = T5Tokenizer.from_pretrained(t5_id)
-        t5_model = T5ForConditionalGeneration.from_pretrained(t5_id)
-
-def search_context(query: str) -> str:
+# ========== Fungsi Cari Konteks ==========
+def search_context(query):
     try:
         params = {
-            "engine": "duckduckgo",
+            "engine": "google",
             "q": query,
             "api_key": SERP_API_KEY,
-            "num": 5
+            "num": 5,
+            "hl": "id"
         }
-        results = GoogleSearch(params).get_dict()
-        texts = [
-            f"{r.get('title', '')}. {r.get('snippet', '')}".strip()
-            for r in results.get("organic_results", [])
-            if r.get("snippet")
-        ]
-        if not texts:
-            return "Context not found."
-        combined = " ".join(texts)[:2000]
-        return GoogleTranslator(source="auto", target="en").translate(combined)
-    except Exception as e:
-        return f"Error: {e}"
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        context_list = []
 
-def generate_answer(q: str, ctx: str) -> str:
-    if "Error" in ctx or "Context not found" in ctx:
+        if "organic_results" in results:
+            for r in results["organic_results"]:
+                if "snippet" in r:
+                    context_list.append(r["snippet"])
+
+        if not context_list:
+            for keyword in fallback_contexts:
+                if keyword in query.lower():
+                    return fallback_contexts[keyword]
+            return "Context not found."
+
+        combined_context = " ".join(context_list)
+        # Terjemahkan hasil konteks ke Inggris
+        translator = GoogleTranslator(source="auto", target="en")
+        translated_context = translator.translate(combined_context)
+        return translated_context
+
+    except Exception as e:
+        return f"Error SerpAPI: {str(e)}"
+
+# ========== Fungsi Jawab Pertanyaan ==========
+def generate_answer(question, context):
+    """Jawab pertanyaan dengan model T5. Terjemahkan pertanyaan ke Inggris, hasilnya ke Indonesia."""
+    if "Error" in context or "Context not found" in context:
         return "Maaf, aku tidak bisa menemukan informasi yang relevan."
 
-    q_en = GoogleTranslator(source="auto", target="en").translate(q)
-    input_ids = t5_tokenizer(
-        f"question: {q_en} context: {ctx}",
-        return_tensors="pt",
-        truncation=True
-    ).input_ids
+    # Terjemahkan pertanyaan ke Inggris
+    translated_question = GoogleTranslator(source="auto", target="en").translate(question)
 
-    output = t5_model.generate(
-        input_ids,
-        max_length=128,
-        num_beams=5,
-        no_repeat_ngram_size=2,
-        early_stopping=True
-    )
+    # Format input untuk T5
+    input_text = f"question: {translated_question}  context: {context}"
+    input_ids = tokenizer_t5(input_text, return_tensors="pt").input_ids
 
-    return GoogleTranslator(source="en", target="id").translate(
-        t5_tokenizer.decode(output[0], skip_special_tokens=True)
-    )
+    # Generate jawaban
+    output_ids = model_t5.generate(input_ids, max_length=128)
+    english_answer = tokenizer_t5.decode(output_ids[0], skip_special_tokens=True)
 
-def predict_intent(text: str) -> str:
-    pred = classifier(text[:512])[0]
-    idx = int(pred["label"].split("_")[1])
-    return labels.get(idx, "lainnya")
+    # Terjemahkan jawaban ke Bahasa Indonesia
+    indonesian_answer = GoogleTranslator(source="en", target="id").translate(english_answer)
+    return indonesian_answer
 
-@app.post("/chat")
-def chat(payload: TextInput):
-    try:
-        load_models()  # ensure models are loaded before use
 
-        q = payload.question
-        ctx = search_context(q)
-        ans = generate_answer(q, ctx)
-        intent = predict_intent(q)
+# ========== Endpoint API ==========
+@app.post("/ask")
+def ask_question(data: QuestionInput):
+    question = data.question
+    intent = predict_intent([question])[0][1]
+    context = search_context(question)
+    answer = generate_answer(question, context)
 
-        return {
-            "question": q,
-            "predicted_intent": intent,
-            "context": ctx,
-            "response": ans,
-            "timestamp": datetime.utcnow()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "question": question,
+        "intent": intent,
+        "context": context,
+        "answer": answer
+    }
