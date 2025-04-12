@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import pipeline, BertTokenizer, BertForSequenceClassification, T5Tokenizer, T5ForConditionalGeneration
 from serpapi import GoogleSearch
@@ -34,6 +35,17 @@ reverse_labels = {v: k for k, v in intent_labels.items()}
 
 # ========== FastAPI App ==========
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://sipa-chat-production.up.railway.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ========== Request Schema ==========
 class QuestionInput(BaseModel):
